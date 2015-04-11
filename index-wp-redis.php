@@ -45,6 +45,8 @@ $websiteIp      = '127.0.0.1';
 $sockets        = false;
 // in case of sockets something like /home/user/.redis/sock
 $redis_server   = '127.0.0.1';
+// default is 0, default options are 0 to 16
+$redis_database = '0' 
 $secret_string  = 'changeme';
 $current_url    = getCleanUrl($secret_string);
 // used to prefix ssl cached pages
@@ -67,6 +69,7 @@ try {
 
         // Sockets can be used as well. Documentation @ https://github.com/nicolasff/phpredis/#connection
         $redis->connect($redis_server);
+        $redis->select($redis_database);
         
     } else { // Fallback to predis5.2.php
 
