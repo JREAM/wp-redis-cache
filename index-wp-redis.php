@@ -1,6 +1,49 @@
 <?php
 
-// Start the timer so we can track the page load time
+// -------------------------------------------------------------------------
+// Config
+// -------------------------------------------------------------------------
+$wp_blog_header_path = dirname( __FILE__ ) . '/wp-blog-header.php';
+
+// ------------------
+// Toggle Debug/Cache
+// ------------------
+$debug = true;
+$cache = true;
+$websiteIp = '127.0.0.1';
+
+// ------------------
+// Toggle Sockets
+// : Optional - If true, set $redis_server to /socket/location
+// ------------------
+$sockets = false;
+$redis_server = '127.0.0.1';
+
+// ---------------------
+// Select a Database
+// : 0-16 (Default is 0)
+// ----------------------
+$redis_database = '2';
+
+// ---------------------
+// Flush Cache String
+// : ?refresh=flush
+// ----------------------
+$secret_string  = 'flush';
+$current_url    = getCleanUrl($secret_string);
+
+// -----------------------
+// Prefix Cached SSL Pages
+// -----------------------
+$isSSL = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || $_SERVER['SERVER_PORT'] == 443) ? "ssl_" : "";
+$redis_key = $isSSL . md5($current_url);
+
+
+// -------------------------------------------------------------------------
+// Function Definitions
+// -------------------------------------------------------------------------
+
+// Timer to track the load time
 $start = microtime();
 
 function getMicroTime($time) {
@@ -24,7 +67,7 @@ function isRemotePageLoad($currentUrl, $websiteIp) {
 }
 
 function handleCDNRemoteAddressing() {
-    // so we don't confuse the cloudflare server
+    // Don't confuse the CloudFlare server
     if (isset($_SERVER['HTTP_CF_CONNECTING_IP'])) {
         $_SERVER['REMOTE_ADDR'] = $_SERVER['HTTP_CF_CONNECTING_IP'];
     }
@@ -37,117 +80,94 @@ function getCleanUrl($secret) {
     return $current_url;
 }
 
-$wp_blog_header_path = dirname( __FILE__ ) . '/wp-blog-header.php';
-$debug = true;
-$cache = true;
-$websiteIp = '127.0.0.1';
-// if you use sockets, set this to true and use $redis_server for socket path
-$sockets = false;
-// in case of sockets something like /home/user/.redis/sock
-$redis_server = '127.0.0.1';
-// default is 0, default options are 0 to 16
-$redis_database = '2';
-$secret_string  = 'flush';
-$current_url    = getCleanUrl($secret_string);
-// used to prefix ssl cached pages
-$isSSL = ((!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || $_SERVER['SERVER_PORT'] == 443) ? "ssl_" : "";
-$redis_key = $isSSL.md5($current_url);
-
 handleCDNRemoteAddressing();
 
+// This is standard in the default index.php file
 if(!defined('WP_USE_THEMES')) {
     define('WP_USE_THEMES', true);
 }
 
-try {
-    // check if PECL Extension is available
-    if (class_exists('Redis')) {
-        if ($debug) {
-            echo "<!-- Redis PECL module found -->\n";
-        }
-        $redis = new Redis();
 
-        // Sockets can be used as well. Documentation @ https://github.com/nicolasff/phpredis/#connection
-        $redis->connect($redis_server);
-        $redis->select($redis_database);
-    }
-    else
+// Failsafe, Display non-cached site.
+if (!class_exists('Redis')) {
+    // Fallback to No-cache so the site doesn't go down :)
+    require( dirname( __FILE__ ) . '/wp-blog-header.php' );
+    exit;
+}
+
+// -------------------------------------------------------------------------
+// The Caching Operation
+// -------------------------------------------------------------------------
+
+// Connect to Redis
+$redis = new Redis();
+$redis->connect($redis_server);
+$redis->select($redis_database);
+
+// Either manual refresh cache by adding ?refresh=secret_string after the URL or somebody posting a comment
+
+$clear_cache = [
+    refreshHasSecret($secret_string),
+    requestHasSecret($secret_string),
+    isRemotePageLoad($current_url, $websiteIp)
+];
+
+if (array_sum($clear_cache) > 0) {
+    // Flush the Database. Not per-page.
+    // Once one person hit's a page it's cached.
+    $redis->flushDB();
+    require $wp_blog_header_path;
+
+    $unlimited = get_option('wp-redis-cache-debug', false);
+    $seconds_cache_redis = get_option('wp-redis-cache-seconds', 43200);
+}
+// Page is cached: Display it
+elseif ($redis->exists($redis_key))
+{
+    $cache  = true;
+    $html_of_page = $redis->get($redis_key);
+    echo $html_of_page;
+}
+// No Cache Exists: Collect Cache after Page Load
+elseif ($_SERVER['REMOTE_ADDR'] != $websiteIp && strstr($current_url, 'preview=true') == false) {
+
+    $isPOST = ($_SERVER['REQUEST_METHOD'] === 'POST') ? 1 : 0;
+    $loggedIn = preg_match("/wordpress_logged_in/", var_export($_COOKIE, true));
+
+    if (!$isPOST && !$loggedIn)
     {
-        die('Redis not running.');
-    }
-
-    // Either manual refresh cache by adding ?refresh=secret_string after the URL or somebody posting a comment
-    if (refreshHasSecret($secret_string) || requestHasSecret($secret_string) || isRemotePageLoad($current_url, $websiteIp)) {
-        if ($debug) {
-            echo "<!-- manual refresh was required -->\n";
-        }
-        $redis->del($redis_key);
-        $redis->del("ssl_".$redis_key);
+        ob_start();
+        $level = ob_get_level();
         require( $wp_blog_header_path );
-
-        $unlimited = get_option('wp-redis-cache-debug', false);
-        $seconds_cache_redis = get_option('wp-redis-cache-seconds', 43200);
-
-    }
-    // This page is cached, lets display it
-    elseif ($redis->exists($redis_key))
-    {
-        if ($debug) {
-            echo "<!-- serving page from cache: key: $redis_key -->\n";
-        }
-
-        $cache  = true;
-        $html_of_page = $redis->get($redis_key);
+        while(ob_get_level() > $level) ob_end_flush();
+        $html_of_page = ob_get_clean(); // ob_get_clean also closes the OB
         echo $html_of_page;
 
-    }
-    // If the cache does not exist lets display the user the normal
-    // page without cache, and then fetch a new cache page
-    elseif ($_SERVER['REMOTE_ADDR'] != $websiteIp && strstr($current_url, 'preview=true') == false) {
-        if ($debug) {
-            echo "<!-- displaying page without cache -->\n";
+        if (!is_numeric($seconds_cache_redis)) {
+            $seconds_cache_redis = 43200;
         }
 
-        $isPOST = ($_SERVER['REQUEST_METHOD'] === 'POST') ? 1 : 0;
-
-        $loggedIn = preg_match("/wordpress_logged_in/", var_export($_COOKIE, true));
-
-        if (!$isPOST && !$loggedIn)
-        {
-            ob_start();
-            $level = ob_get_level();
-            require( $wp_blog_header_path );
-            while(ob_get_level() > $level) ob_end_flush();
-            $html_of_page = ob_get_clean(); // ob_get_clean also closes the OB
-            echo $html_of_page;
-
-            if (!is_numeric($seconds_cache_redis)) {
-                $seconds_cache_redis = 43200;
+        // When a page displays after an "HTTP 404: Not Found" error occurs, do not cache
+        // When the search was used, do not cache
+        if ((!is_404()) and (!is_search()))  {
+            if ($unlimited) {
+                $redis->set($redis_key, $html_of_page);
+            } else {
+                $redis->setex($redis_key, $seconds_cache_redis, $html_of_page);
             }
 
-            // When a page displays after an "HTTP 404: Not Found" error occurs, do not cache
-            // When the search was used, do not cache
-            if ((!is_404()) and (!is_search()))  {
-                if ($unlimited) {
-                    $redis->set($redis_key, $html_of_page);
-                } else {
-                    $redis->setex($redis_key, $seconds_cache_redis, $html_of_page);
-                }
-
-            }
         }
-        // Either the user is logged in, or is posting a comment, show them uncached
-        else {
-            require( $wp_blog_header_path );
-        }
-
     }
-    else if ($_SERVER['REMOTE_ADDR'] != $websiteIp && strstr($current_url, 'preview=true') == true) {
+    // Either the user is logged in, or is posting a comment, show them uncached
+    else
+    {
         require( $wp_blog_header_path );
     }
 
-} catch (Exception $e) {
-    echo "Something went wrong: " . $e->getMessage();
+}
+else if ($_SERVER['REMOTE_ADDR'] != $websiteIp && strstr($current_url, 'preview=true') == true)
+{
+    require $wp_blog_header_path;
 }
 
 $end  = microtime();
