@@ -8,7 +8,7 @@ $wp_blog_header_path = dirname( __FILE__ ) . '/wp-blog-header.php';
 // ------------------
 // Toggle Debug/Cache
 // ------------------
-$debug = true;
+$debug = false;
 $cache = true;
 $website_ip = '127.0.0.1';
 
